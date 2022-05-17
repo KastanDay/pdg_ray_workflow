@@ -369,31 +369,30 @@ def build_filepath(input_file):
 
 @ray.remote
 def three_d_tile(input_file, filename, save_to):
-    # try:
+    try:
+        # the 3DTile saves the .b3dm file. 
+        tile = viz_3dtiles.Cesium3DTile()
+        tile.set_save_to_path(save_to)
+        tile.set_b3dm_name(filename)        
+        # build 3d tile.
+        tile.from_file(filepath=input_file)
 
-    # the tile saves the .b3dm file. 
-    tile = viz_3dtiles.Cesium3DTile()
-    tile.set_save_to_path(save_to)
-    tile.set_b3dm_name(filename)
-    
-    # run -- build 3d tile.
-    tile.from_file(filepath=input_file)
-    # tile_properties = tile.get_all_properties()
-
-    # Tileset saves the json. 
-    tileset = viz_3dtiles.Cesium3DTileset(tile)
-    tileset.set_save_to_path(save_to)
-    tileset.set_json_filename(filename)
-    tileset.write_file()
+        # Tileset saves the json summary.
+        tileset = viz_3dtiles.Cesium3DTileset(tile)
+        tileset.set_save_to_path(save_to)
+        tileset.set_json_filename(filename)
+        tileset.write_file()
         
-    # except Exception as e:
-    #     print("❌❌  Failed to create 3D tile. Error:", e)
-    # # todo catch failures
-
+    except Exception as e:
+        return [f"‼️ ‼️ ❌ ❌ ❌ ❌ -- THIS TASK FAILED ❌ ❌ ❌ ❌ ‼️ ‼️ with path: {save_to, filename} and \nError: {e}\nTraceback: {traceback.print_exc()}", 
+    socket.gethostbyname(socket.gethostname())]
+    
+    # success case
     return [f"Path {save_to}", socket.gethostbyname(socket.gethostname())]
 
 def step0_3d_tiles():
     IP_ADDRESSES_OF_WORK_3D_TILES = []
+    FAILURES_3D_TILES = []
 
     try:
         # collect staged files
@@ -416,22 +415,33 @@ def step0_3d_tiles():
         # get 3D tiles, send to Tileset
         for i in range(0,len(staged_files_list)): 
             ready, not_ready = ray.wait(ids)
-            print(f"✅ Finished {ray.get(ready)[0][0]}")
-            print(f"📌 Completed {i+1} of {len(staged_files_list)}, {(i+1)/len(staged_files_list)*100}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
-            IP_ADDRESSES_OF_WORK_3D_TILES.append(ray.get(ready)[0][1])
+            
+            # Check for failures
+            if any(err in ray.get(ready)[0] for err in ["FAILED", "Failed", "❌"]):
+                # failure case
+                FAILURES_3D_TILES.append( [ray.get(ready)[0][0], ray.get(ready)[0][1]] )
+                print(f"❌ Failed {ray.get(ready)}")
+            else:
+                # success case
+                print(f"✅ Finished {ray.get(ready)[0][0]}")
+                print(f"📌 Completed {i+1} of {len(staged_files_list)}, {(i+1)/len(staged_files_list)*100}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
+                IP_ADDRESSES_OF_WORK_3D_TILES.append(ray.get(ready)[0][1])
 
             ids = not_ready
             if not ids:
                 break
-    # todo maybe return the failed line... Then check the return.
+            
     except Exception as e:
-        print("❌❌  Failed in main Ray loop (3d tiles). Error:", e)
+        print("❌❌  Failed in main Ray loop (of Viz-3D). Error:", e)
     finally:
         print(f"⏰ Running total of elapsed time: {(time.time() - start)/60:.2f} minutes\n")
         print("Which nodes were used?")
         for ip_address, num_tasks in Counter(IP_ADDRESSES_OF_WORK_3D_TILES).items():
             print('    {} tasks on {}'.format(num_tasks, ip_address))
-
+        print(f"There were {len(FAILURES_3D_TILES)} failures.")
+        # todo -- group failures by node IP address...
+        for failure_text, ip_address in FAILURES_3D_TILES:
+            print(f"    {failure_text} on {ip_address}")
 
 def main():
     ray.shutdown()
