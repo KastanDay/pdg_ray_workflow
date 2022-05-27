@@ -105,8 +105,8 @@ def step4(tile_manager, rasterizer, batch_size_web_tiles=100):
     Infinite parallelism.
     '''
     start = time.time()
-    # Update (color?) ranges
-    # rasterizer.update_ranges() # todo- readd this
+    # Update color ranges
+    rasterizer.update_ranges() # todo- readd this
 
     # Process web tiles in batches
     # geotiff_path = '/home/kastanday/viz/viz-raster/geotiff'
