@@ -1,4 +1,6 @@
-# conda env create -f environment_from_history.yml
+# <mamba or conda> env create -f environment_cross_platform.yml
+# try mamba first, it's faster and safe. It if fails (`Could not find a version...`), use conda. 
+# Except, errors about 'pdgpy3dtiles' are expected! Must be installed manually.. Still under dev.
 name: full_viz_pipeline
 channels:
   - conda-forge
