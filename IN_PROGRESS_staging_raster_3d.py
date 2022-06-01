@@ -54,8 +54,8 @@ def main():
     # instantiate classes for their helper functions
     rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
     stager = pdgstaging.TileStager(IWP_CONFIG)
-    tile_manager = stager.tiles
-    config_manager = stager.config
+    # tile_manager = stager.tiles
+    # config_manager = stager.config
     start = time.time()
 
     
@@ -63,18 +63,18 @@ def main():
     try:
         ########## MAIN STEPS ##########
 
-        # step0_3d_tiles()
-        step1_result = step1_staging(tile_manager)
-        print(step1_result) # staging
-        # step2_result = step2(stager)
-        # print(step2_result) # rasterize highest Z level only 
-        # step3(stager, config_manager, batch_size_geotiffs=100) # rasterize all LOWER Z levels
+        step0_result = step0_staging(stager)           # Staging 
+        print(step0_result)
+        step1_3d_tiles()                             # Create 3D tiles from .shp
+        # step2_result = step2(stager)                 # rasterize highest Z level only 
+        # print(step2_result)                          
+        # step3(stager, batch_size_geotiffs=100)       # rasterize all LOWER Z levels
         # step4(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
 
         """
         # NOT WORKING YET (6/1/22)
         ########## RAY WORKFLOWS VERSION (same as above) ##########
-        step1_result = step1_staging.step(tile_manager)
+        step1_result = step0_staging.step(tile_manager)
         setp2_result = step2.step(stager) # rasterize highest Z level
         step3(tile_manager, config_manager, batch_size_geotiffs=100) # rasterize all other Z levels
         step4(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
@@ -95,66 +95,13 @@ def main():
 
 ############### MAIN STEPS ###############
 
-def step0_3d_tiles():
-    IP_ADDRESSES_OF_WORK_3D_TILES = []
-    FAILURES_3D_TILES = []
-
-    try:
-        # collect staged files
-        stager = pdgstaging.TileStager(IWP_CONFIG)
-        stager.tiles.add_base_dir('staging', OUTPUT_OF_STAGING, '.gpkg')
-        staged_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'staging')
-        print("total staged files len:", len(staged_files_list))
-
-        # START JOBS
-        start = time.time()
-        ids = []
-        for filepath in staged_files_list:
-            filename, save_to_dir = build_filepath(filepath)
-            # print(filepath)
-            # print(save_to_dir, filename, "\n") # todo remove print
-            ids.append(three_d_tile.remote(filepath, filename, save_to_dir))
-
-        print("RUNNING {} JOBS".format(len(ids)))
-
-        # get 3D tiles, send to Tileset
-        for i in range(0,len(staged_files_list)): 
-            ready, not_ready = ray.wait(ids)
-            
-            # Check for failures
-            if any(err in ray.get(ready)[0] for err in ["FAILED", "Failed", "❌"]):
-                # failure case
-                FAILURES_3D_TILES.append( [ray.get(ready)[0][0], ray.get(ready)[0][1]] )
-                print(f"❌ Failed {ray.get(ready)}")
-            else:
-                # success case
-                print(f"✅ Finished {ray.get(ready)[0][0]}")
-                print(f"📌 Completed {i+1} of {len(staged_files_list)}, {(i+1)/len(staged_files_list)*100}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
-                IP_ADDRESSES_OF_WORK_3D_TILES.append(ray.get(ready)[0][1])
-
-            ids = not_ready
-            if not ids:
-                break
-            
-    except Exception as e:
-        print("❌❌  Failed in main Ray loop (of Viz-3D). Error:", e)
-    finally:
-        print(f"⏰ Running total of elapsed time: {(time.time() - start)/60:.2f} minutes\n")
-        print("Which nodes were used?")
-        for ip_address, num_tasks in Counter(IP_ADDRESSES_OF_WORK_3D_TILES).items():
-            print('    {} tasks on {}'.format(num_tasks, ip_address))
-        print(f"There were {len(FAILURES_3D_TILES)} failures.")
-        # todo -- group failures by node IP address...
-        for failure_text, ip_address in FAILURES_3D_TILES:
-            print(f"    {failure_text} on {ip_address}")
-
-# @workflow.step(name="Step1_StageAll")
-def step1_staging(tile_manager):
+# @workflow.step(name="Step0_Stage_All")
+def step0_staging(stager):
     start = time.time()
 
     ids = []
-    tile_manager.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
-    staging_input_files_list = tile_manager.get_filenames_from_dir(base_dir = 'base_input')
+    stager.tile_manager.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
+    staging_input_files_list = stager.tile_manager.get_filenames_from_dir(base_dir = 'base_input')
 
     if ONLY_SMALL_TEST_RUN:
         staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
@@ -216,7 +163,63 @@ def step1_staging(tile_manager):
         
         return "😁 step 1 success"
 
-# @workflow.step(name="Step2_RasterizeAll_only_higest_z_level")
+# @workflow.step(name="Step1_3D_Tiles")
+def step1_3d_tiles(stager):
+    IP_ADDRESSES_OF_WORK_3D_TILES = []
+    FAILURES_3D_TILES = []
+
+    try:
+        # collect staged files
+        stager.tiles.add_base_dir('staging', OUTPUT_OF_STAGING, '.gpkg')
+        staged_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'staging')
+
+        if ONLY_SMALL_TEST_RUN:
+            staged_files_list = staged_files_list[:TEST_RUN_SIZE]
+        print("total staged files len:", len(staged_files_list))
+
+        # START JOBS
+        start = time.time()
+        ids = []
+        for filepath in staged_files_list:
+            filename, save_to_dir = build_filepath(filepath)
+            # print(filepath)
+            # print(save_to_dir, filename, "\n") # todo remove print
+            ids.append(three_d_tile.remote(filepath, filename, save_to_dir))
+
+        print("RUNNING {} JOBS".format(len(ids)))
+
+        # get 3D tiles, send to Tileset
+        for i in range(0,len(staged_files_list)): 
+            ready, not_ready = ray.wait(ids)
+            
+            # Check for failures
+            if any(err in ray.get(ready)[0] for err in ["FAILED", "Failed", "❌"]):
+                # failure case
+                FAILURES_3D_TILES.append( [ray.get(ready)[0][0], ray.get(ready)[0][1]] )
+                print(f"❌ Failed {ray.get(ready)}")
+            else:
+                # success case
+                print(f"✅ Finished {ray.get(ready)[0][0]}")
+                print(f"📌 Completed {i+1} of {len(staged_files_list)}, {(i+1)/len(staged_files_list)*100}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
+                IP_ADDRESSES_OF_WORK_3D_TILES.append(ray.get(ready)[0][1])
+
+            ids = not_ready
+            if not ids:
+                break
+            
+    except Exception as e:
+        print("❌❌  Failed in main Ray loop (of Viz-3D). Error:", e)
+    finally:
+        print(f"⏰ Running total of elapsed time: {(time.time() - start)/60:.2f} minutes\n")
+        print("Which nodes were used?")
+        for ip_address, num_tasks in Counter(IP_ADDRESSES_OF_WORK_3D_TILES).items():
+            print('    {} tasks on {}'.format(num_tasks, ip_address))
+        print(f"There were {len(FAILURES_3D_TILES)} failures.")
+        # todo -- group failures by node IP address...
+        for failure_text, ip_address in FAILURES_3D_TILES:
+            print(f"    {failure_text} on {ip_address}")
+
+# @workflow.step(name="Step2_Rasterize_only_higest_z_level")
 def step2(stager, batch_size=10):
     """
     This is a BLOCKING step (but it can run in parallel).
@@ -267,16 +270,16 @@ def step2(stager, batch_size=10):
     print(f'⏰ Total time to rasterize {len(staged_paths)} tiles: {(time.time() - start)/60:.2f} minutes\n')
     return "Done rasterize all only highest z level"
 
-# @workflow.step(name="Step3_RasterizeAll_all_z_levels")
-def step3(stager, config_manager, batch_size_geotiffs=200):
+# @workflow.step(name="Step3_Rasterize_lower_z_levels")
+def step3(stager, batch_size_geotiffs=200):
     '''
     STEP 3: Create parent geotiffs for all z-levels (except highest)
     THIS IS HARD TO PARALLELIZE multiple zoom levels at once..... sad, BUT
     👉 WE DO PARALLELIZE BATCHES WITHIN one zoom level.
     '''
     # find all Z levels
-    min_z = config_manager.get_min_z()
-    max_z = config_manager.get_max_z()
+    min_z = stager.config_manager.get_min_z()
+    max_z = stager.config_manager.get_max_z()
     parent_zs = range(max_z - 1, min_z - 1, -1)
     print("3️⃣ Step 3: Create parent geotiffs for all z-levels (except highest)")
     
