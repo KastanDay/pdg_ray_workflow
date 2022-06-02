@@ -3,11 +3,11 @@ Ray PDG's Viz-staging, Viz-Raster and Viz-3D in parallel using Ray Core and Ray 
 
 ### requirements
 
-Run this to install dependencies:
+Run this to install dependencies (only tested on x86_64):
 ```
-conda env create --file environment.yml
+conda env create --file environment_cross_platform.yml
 ```
-TODO: the current env has wayyy to many specific dependencies. Should clean this up to only the necessary ones. 
+TODO: Reduce strictness of env.yml requirements.
 
 ### contributing
 
