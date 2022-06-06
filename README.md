@@ -26,13 +26,14 @@ ray start --head --port=6379 --dashboard-port=8265
 ```
 ssh <👉YOUR_NCSA_USERNAME👈>@login.delta.ncsa.illinois.edu
 ```
-2. Start a Slurm job. `cpus-per-task` must be large (128 maximum on Delta) for Ray to scale well.
+2. Start a Slurm job. `cpus-per-task` must be large (128 maximum on Delta) for Ray to scale well. 
 
 ```
 # max CPU node request (for single node)
 srun --account=<👉YOUR_CPU_ACCOUNT👈> --partition=cpu \
 --nodes=1 --tasks=1 --tasks-per-node=1 \
 --cpus-per-task=128 --mem=240g \
+--time=02:00:00 \
 --pty bash
 ```
 
