@@ -68,7 +68,7 @@ dependencies:
     - nvidia-ml-py3==7.352.0
     - opencensus==0.9.0
     - opencensus-context==0.1.2
-    - pdgpy3dtiles==0.0.1
+    - pdgpy3dtiles
     - pdgraster==0.1.0
     - pdgstaging==0.1.0
     - platformdirs==2.5.2

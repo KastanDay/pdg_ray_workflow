@@ -20,10 +20,14 @@ import pathlib
 # ALWAYS include the tailing slash "/"
 BASE_DIR_OF_INPUT = '/home/ray/maple_data/'   # The output data of MAPLE. Which is the input data for STAGING.
 OUTPUT            = '/home/ray/output/'       # Dir for results. High I/O is good.
+# BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
+# OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
 GEOTIFF_PATH      = OUTPUT + 'geotiff/'
 WEBTILE_PATH      = OUTPUT + 'web_tiles/'
 THREE_D_PATH      = OUTPUT + '3d_tiles/'
+
+RAY_ADDRESS       = '141.142.144.140:6379'  # SET ME!! using output from `$ ray start --head --port=6379 --dashboard-port=8265`
 
 # Convenience for little test runs. Change me 😁  
 ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
@@ -42,9 +46,9 @@ IP_ADDRESSES_OF_WORK = []
 def main():
     ray.shutdown()
     assert ray.is_initialized() == False
-    # ray.init(address="141.142.204.7:6379", dashboard_port=8265)   # most reliable way to start Ray
+    ray.init(address=RAY_ADDRESS, dashboard_port=8265)   # most reliable way to start Ray
     # use port-forwarding to see dashboard: `ssh -L 8265:localhost:8265 kastanday@kingfisher.ncsa.illinois.edu`
-    ray.init(address='auto')                                    # multinode, but less reliable than above.
+    # ray.init(address='auto')                                    # multinode, but less reliable than above.
     # ray.init()                                                  # single-node only!
     assert ray.is_initialized() == True
 
@@ -123,8 +127,9 @@ def step0_staging(stager):
             {len(ray.nodes())} nodes in total
             {ray.cluster_resources()['CPU']} CPU cores in total
             {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total
-            {ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total
         ''')
+        # if (ray.cluster_resources()['GPU']):
+        #     print(f"{ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
 
         # BLOCKING - WAIT FOR REMOTE FUNCTIONS TO FINISH
         for i in range(0, len(ids)): 
