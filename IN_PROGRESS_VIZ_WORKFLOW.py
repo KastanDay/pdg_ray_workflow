@@ -18,16 +18,18 @@ import pathlib
 
 # Change me 😁  
 # ALWAYS include the tailing slash "/"
-BASE_DIR_OF_INPUT = '/home/kastanday/maple_data/'   # The output data of MAPLE. Which is the input data for STAGING.
-OUTPUT            = '/home/kastanday/output/'       # Dir for results. High I/O is good.
+BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
+OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
 GEOTIFF_PATH      = OUTPUT + 'geotiff/'
 WEBTILE_PATH      = OUTPUT + 'web_tiles/'
 THREE_D_PATH      = OUTPUT + '3d_tiles/'
 
+RAY_ADDRESS       = '141.142.144.140:6379'  # SET ME!! using output from `$ ray start --head --port=6379 --dashboard-port=8265`
+
 # Convenience for little test runs. Change me 😁  
 ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
-TEST_RUN_SIZE       = 3                              # Number of files to pre processed during testing (only effects testing)
+TEST_RUN_SIZE       = 256                              # Number of files to pre processed during testing (only effects testing)
 
 # ⛔️ don't change these ⛔️
 IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', 'dir_geotiff': GEOTIFF_PATH, 'dir_web_tiles': WEBTILE_PATH, 'dir_staged': OUTPUT_OF_STAGING, 'filename_staging_summary': OUTPUT_OF_STAGING + 'staging_summary.csv', 'filename_rasterization_events': GEOTIFF_PATH + 'raster_events.csv', 'filename_rasters_summary': GEOTIFF_PATH + 'raster_summary.csv', 'simplify_tolerance': 1e-05, 'tms_id': 'WorldCRS84Quad', 'tile_path_structure': ['style', 'tms', 'z', 'x', 'y'], 'z_range': [0, 13], 'tile_size': [256, 256], 'statistics': [{'name': 'iwp_count', 'weight_by': 'count', 'property': 'centroids_per_pixel', 'aggregation_method': 'sum', 'resampling_method': 'sum', 'val_range': [0, None], 'palette': ['rgb(102 51 153 / 0.1)', '#d93fce', 'lch(85% 100 85)']}, {'name': 'iwp_coverage', 'weight_by': 'area', 'property': 'area_per_pixel_area', 'aggregation_method': 'sum', 'resampling_method': 'average', 'val_range': [0, 1], 'palette': ['rgb(102 51 153 / 0.1)', 'lch(85% 100 85)']}], 'deduplicate_at': ['raster'], 'deduplicate_method': 'neighbor', 'deduplicate_keep_rules': [['Date', 'larger'], ['Time', 'larger']], 'deduplicate_overlap_tolerance': 0, 'deduplicate_overlap_both': False, 'deduplicate_centroid_tolerance': None}
@@ -43,7 +45,7 @@ IP_ADDRESSES_OF_WORK = []
 def main():
     ray.shutdown()
     assert ray.is_initialized() == False
-    ray.init(address="141.142.204.7:6379", dashboard_port=8265)   # most reliable way to start Ray
+    ray.init(address=RAY_ADDRESS, dashboard_port=8265)   # most reliable way to start Ray
     # ray.init(address='auto')                                    # multinode, but less reliable than above.
     # ray.init()                                                  # single-node only!
     assert ray.is_initialized() == True
@@ -65,7 +67,7 @@ def main():
 
         step0_result = step0_staging(stager)           # Staging 
         print(step0_result)
-        step1_3d_tiles()                             # Create 3D tiles from .shp
+        step1_3d_tiles(stager)                             # Create 3D tiles from .shp
         # step2_result = step2(stager)                 # rasterize highest Z level only 
         # print(step2_result)                          
         # step3(stager, batch_size_geotiffs=100)       # rasterize all LOWER Z levels
@@ -100,8 +102,8 @@ def step0_staging(stager):
     start = time.time()
 
     ids = []
-    stager.tile_manager.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
-    staging_input_files_list = stager.tile_manager.get_filenames_from_dir(base_dir = 'base_input')
+    stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
+    staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
 
     if ONLY_SMALL_TEST_RUN:
         staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
@@ -122,8 +124,9 @@ def step0_staging(stager):
             {len(ray.nodes())} nodes in total
             {ray.cluster_resources()['CPU']} CPU cores in total
             {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total
-            {ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total
         ''')
+        # if (ray.cluster_resources()['GPU']):
+        #     print(f"{ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
 
         # BLOCKING - WAIT FOR REMOTE FUNCTIONS TO FINISH
         for i in range(0, len(ids)): 
@@ -226,7 +229,7 @@ def step2(stager, batch_size=10):
     Rasterize all staged tiles (only highest z-level).
     """
     # Get paths to all the newly staged tiles
-    stager.tile_manager.add_base_dir('output_of_staging', OUTPUT_OF_STAGING, '.gpkg')
+    stager.tiles.add_base_dir('output_of_staging', OUTPUT_OF_STAGING, '.gpkg')
     staged_paths = stager.tiles.get_filenames_from_dir( base_dir = 'output_of_staging' )
 
     if ONLY_SMALL_TEST_RUN:
@@ -291,7 +294,7 @@ def step3(stager, batch_size_geotiffs=200):
         print(f"👉 Starting Z level {z} of {len(parent_zs)}")
         # Loop thru Z levels 
         # Make lower z-levels based on the path names of the files just created
-        stager.tile_manager.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
+        stager.tiles.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
         child_paths = stager.tiles.get_filenames_from_dir( base_dir = 'geotiff_path', z=z + 1)
 
         if ONLY_SMALL_TEST_RUN:
