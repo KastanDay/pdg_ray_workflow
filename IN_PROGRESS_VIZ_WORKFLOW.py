@@ -18,8 +18,8 @@ import pathlib
 
 # Change me 😁  
 # ALWAYS include the tailing slash "/"
-BASE_DIR_OF_INPUT = '/home/kastanday/maple_data/'   # The output data of MAPLE. Which is the input data for STAGING.
-OUTPUT            = '/home/kastanday/output/'       # Dir for results. High I/O is good.
+BASE_DIR_OF_INPUT = '/home/ray/maple_data/'   # The output data of MAPLE. Which is the input data for STAGING.
+OUTPUT            = '/home/ray/output/'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
 GEOTIFF_PATH      = OUTPUT + 'geotiff/'
 WEBTILE_PATH      = OUTPUT + 'web_tiles/'
@@ -42,13 +42,11 @@ IP_ADDRESSES_OF_WORK = []
 def main():
     ray.shutdown()
     assert ray.is_initialized() == False
-    ray.init(address="141.142.204.7:6379", dashboard_port=8265)   # most reliable way to start Ray
+    # ray.init(address="141.142.204.7:6379", dashboard_port=8265)   # most reliable way to start Ray
     # use port-forwarding to see dashboard: `ssh -L 8265:localhost:8265 kastanday@kingfisher.ncsa.illinois.edu`
-
-    # ray.init(address='auto')                                    # multinode, but less reliable than above.
+    ray.init(address='auto')                                    # multinode, but less reliable than above.
     # ray.init()                                                  # single-node only!
     assert ray.is_initialized() == True
-    workflow.init(storage="/home/kastanday/~/ray_workflow_storage")
 
     # instantiate classes for their helper functions
     rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
@@ -62,8 +60,8 @@ def main():
     try:
         ########## MAIN STEPS ##########
 
-        # step0_result = step0_staging(stager)           # Staging 
-        # print(step0_result)
+        step0_result = step0_staging(stager)           # Staging 
+        print(step0_result)
         # step1_3d_tiles(stager)                         # Create 3D tiles from .shp
         # step2_result = step2_raster_highest(stager)                   # rasterize highest Z level only 
         # print(step2_result)                          
@@ -73,7 +71,9 @@ def main():
         
         # NOT WORKING YET (6/1/22)
         ########## RAY WORKFLOWS VERSION (same as above) ##########
-        step0_result = step0_staging.step(stager)
+
+        # workflow.init(storage="/home/kastanday/~/ray_workflow_storage")
+        # step0_result = step0_staging.step(stager)
         # step1_result = step1_3d_tiles.step(stager)
         # setp2_result = step2_raster_highest.step(stager) # rasterize highest Z level
         # step3_raster_lower(stager, batch_size_geotiffs=100) # rasterize all other Z levels
@@ -81,9 +81,9 @@ def main():
 
         # RUN WORKFLOW
         
-        workflow_id = make_workflow_id('first_test_step_0') # add arbitrary human-readable name
-        step0_result.run(workflow_id)
-        print("Workflow status is: " + workflow.get_status(workflow_id=workflow_id))
+        # workflow_id = make_workflow_id('first_test_step_0') # add arbitrary human-readable name
+        # step0_result.run(workflow_id)
+        # print("Workflow status is: " + workflow.get_status(workflow_id=workflow_id))
         
 
     except Exception as e:
@@ -96,7 +96,7 @@ def main():
 
 ############### MAIN STEPS ###############
 
-@workflow.step(name="Step0_Stage_All")
+# @workflow.step(name="Step0_Stage_All")
 def step0_staging(stager):
     start = time.time()
 
@@ -164,7 +164,7 @@ def step0_staging(stager):
         
         return "😁 step 1 success"
 
-@workflow.step(name="Step1_3D_Tiles")
+# @workflow.step(name="Step1_3D_Tiles")
 def step1_3d_tiles(stager):
     IP_ADDRESSES_OF_WORK_3D_TILES = []
     FAILURES_3D_TILES = []
