@@ -8,7 +8,7 @@ import viz_3dtiles #import Cesium3DTile, Cesium3DTileset
 
 import os
 import ray
-# from ray import workflow
+from ray import workflow
 import time
 import sys
 import traceback
@@ -27,7 +27,7 @@ THREE_D_PATH      = OUTPUT + '3d_tiles/'
 
 # Convenience for little test runs. Change me 😁  
 ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
-TEST_RUN_SIZE       = 3                              # Number of files to pre processed during testing (only effects testing)
+TEST_RUN_SIZE       = 2                              # Number of files to pre processed during testing (only effects testing)
 
 # ⛔️ don't change these ⛔️
 IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', 'dir_geotiff': GEOTIFF_PATH, 'dir_web_tiles': WEBTILE_PATH, 'dir_staged': OUTPUT_OF_STAGING, 'filename_staging_summary': OUTPUT_OF_STAGING + 'staging_summary.csv', 'filename_rasterization_events': GEOTIFF_PATH + 'raster_events.csv', 'filename_rasters_summary': GEOTIFF_PATH + 'raster_summary.csv', 'simplify_tolerance': 1e-05, 'tms_id': 'WorldCRS84Quad', 'tile_path_structure': ['style', 'tms', 'z', 'x', 'y'], 'z_range': [0, 13], 'tile_size': [256, 256], 'statistics': [{'name': 'iwp_count', 'weight_by': 'count', 'property': 'centroids_per_pixel', 'aggregation_method': 'sum', 'resampling_method': 'sum', 'val_range': [0, None], 'palette': ['rgb(102 51 153 / 0.1)', '#d93fce', 'lch(85% 100 85)']}, {'name': 'iwp_coverage', 'weight_by': 'area', 'property': 'area_per_pixel_area', 'aggregation_method': 'sum', 'resampling_method': 'average', 'val_range': [0, 1], 'palette': ['rgb(102 51 153 / 0.1)', 'lch(85% 100 85)']}], 'deduplicate_at': ['raster'], 'deduplicate_method': 'neighbor', 'deduplicate_keep_rules': [['Date', 'larger'], ['Time', 'larger']], 'deduplicate_overlap_tolerance': 0, 'deduplicate_overlap_both': False, 'deduplicate_centroid_tolerance': None}
@@ -38,18 +38,17 @@ IP_ADDRESSES_OF_WORK = []
 
 # TODO: return path names instead of 0. 
 # TODO: use logging instead of prints. 
-# TODO: Global option for small test run.
 
 def main():
     ray.shutdown()
     assert ray.is_initialized() == False
     ray.init(address="141.142.204.7:6379", dashboard_port=8265)   # most reliable way to start Ray
+    # use port-forwarding to see dashboard: `ssh -L 8265:localhost:8265 kastanday@kingfisher.ncsa.illinois.edu`
+
     # ray.init(address='auto')                                    # multinode, but less reliable than above.
     # ray.init()                                                  # single-node only!
     assert ray.is_initialized() == True
-    
-    # todo add Ray Workflows
-    # workflow.init(storage="/home/kastanday/~/ray_workflow_storage")
+    workflow.init(storage="/home/kastanday/~/ray_workflow_storage")
 
     # instantiate classes for their helper functions
     rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
@@ -63,27 +62,29 @@ def main():
     try:
         ########## MAIN STEPS ##########
 
-        step0_result = step0_staging(stager)           # Staging 
-        print(step0_result)
-        step1_3d_tiles()                             # Create 3D tiles from .shp
-        # step2_result = step2(stager)                 # rasterize highest Z level only 
+        # step0_result = step0_staging(stager)           # Staging 
+        # print(step0_result)
+        # step1_3d_tiles(stager)                         # Create 3D tiles from .shp
+        # step2_result = step2_raster_highest(stager)                   # rasterize highest Z level only 
         # print(step2_result)                          
-        # step3(stager, batch_size_geotiffs=100)       # rasterize all LOWER Z levels
-        # step4(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
+        # step3_raster_lower(stager, batch_size_geotiffs=100)         # rasterize all LOWER Z levels
+        # step4_webtiles(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
 
-        """
+        
         # NOT WORKING YET (6/1/22)
         ########## RAY WORKFLOWS VERSION (same as above) ##########
-        step1_result = step0_staging.step(tile_manager)
-        setp2_result = step2.step(stager) # rasterize highest Z level
-        step3(tile_manager, config_manager, batch_size_geotiffs=100) # rasterize all other Z levels
-        step4(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
+        step0_result = step0_staging.step(stager)
+        # step1_result = step1_3d_tiles.step(stager)
+        # setp2_result = step2_raster_highest.step(stager) # rasterize highest Z level
+        # step3_raster_lower(stager, batch_size_geotiffs=100) # rasterize all other Z levels
+        # step4_webtiles(stager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
 
-        RUN WORKFLOW
-        workflow_id = make_workflow_id('first_test_step_2') # add arbitrary human-readable name
-        setp2_result.run(workflow_id)
+        # RUN WORKFLOW
+        
+        workflow_id = make_workflow_id('first_test_step_0') # add arbitrary human-readable name
+        step0_result.run(workflow_id)
         print("Workflow status is: " + workflow.get_status(workflow_id=workflow_id))
-        """
+        
 
     except Exception as e:
         print(f"Caught error in main: {str(e)}", "\nTraceback", traceback.print_exc())
@@ -95,13 +96,13 @@ def main():
 
 ############### MAIN STEPS ###############
 
-# @workflow.step(name="Step0_Stage_All")
+@workflow.step(name="Step0_Stage_All")
 def step0_staging(stager):
     start = time.time()
 
     ids = []
-    stager.tile_manager.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
-    staging_input_files_list = stager.tile_manager.get_filenames_from_dir(base_dir = 'base_input')
+    stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
+    staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
 
     if ONLY_SMALL_TEST_RUN:
         staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
@@ -163,7 +164,7 @@ def step0_staging(stager):
         
         return "😁 step 1 success"
 
-# @workflow.step(name="Step1_3D_Tiles")
+@workflow.step(name="Step1_3D_Tiles")
 def step1_3d_tiles(stager):
     IP_ADDRESSES_OF_WORK_3D_TILES = []
     FAILURES_3D_TILES = []
@@ -182,21 +183,17 @@ def step1_3d_tiles(stager):
         ids = []
         for filepath in staged_files_list:
             filename, save_to_dir = build_filepath(filepath)
-            # print(filepath)
-            # print(save_to_dir, filename, "\n") # todo remove print
             ids.append(three_d_tile.remote(filepath, filename, save_to_dir))
-
-        print("RUNNING {} JOBS".format(len(ids)))
 
         # get 3D tiles, send to Tileset
         for i in range(0,len(staged_files_list)): 
             ready, not_ready = ray.wait(ids)
             
             # Check for failures
-            if any(err in ray.get(ready)[0] for err in ["FAILED", "Failed", "❌"]):
+            if any(err in ray.get(ready)[0][0] for err in ["FAILED", "Failed", "❌"]):
                 # failure case
                 FAILURES_3D_TILES.append( [ray.get(ready)[0][0], ray.get(ready)[0][1]] )
-                print(f"❌ Failed {ray.get(ready)}")
+                print(f"❌ Failed {ray.get(ready)[0][0]}")
             else:
                 # success case
                 print(f"✅ Finished {ray.get(ready)[0][0]}")
@@ -220,13 +217,13 @@ def step1_3d_tiles(stager):
             print(f"    {failure_text} on {ip_address}")
 
 # @workflow.step(name="Step2_Rasterize_only_higest_z_level")
-def step2(stager, batch_size=10):
+def step2_raster_highest(stager, batch_size=10):
     """
     This is a BLOCKING step (but it can run in parallel).
     Rasterize all staged tiles (only highest z-level).
     """
     # Get paths to all the newly staged tiles
-    stager.tile_manager.add_base_dir('output_of_staging', OUTPUT_OF_STAGING, '.gpkg')
+    stager.tiles.add_base_dir('output_of_staging', OUTPUT_OF_STAGING, '.gpkg')
     staged_paths = stager.tiles.get_filenames_from_dir( base_dir = 'output_of_staging' )
 
     if ONLY_SMALL_TEST_RUN:
@@ -271,7 +268,7 @@ def step2(stager, batch_size=10):
     return "Done rasterize all only highest z level"
 
 # @workflow.step(name="Step3_Rasterize_lower_z_levels")
-def step3(stager, batch_size_geotiffs=200):
+def step3_raster_lower(stager, batch_size_geotiffs=200):
     '''
     STEP 3: Create parent geotiffs for all z-levels (except highest)
     THIS IS HARD TO PARALLELIZE multiple zoom levels at once..... sad, BUT
@@ -291,7 +288,7 @@ def step3(stager, batch_size_geotiffs=200):
         print(f"👉 Starting Z level {z} of {len(parent_zs)}")
         # Loop thru Z levels 
         # Make lower z-levels based on the path names of the files just created
-        stager.tile_manager.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
+        stager.tiles.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
         child_paths = stager.tiles.get_filenames_from_dir( base_dir = 'geotiff_path', z=z + 1)
 
         if ONLY_SMALL_TEST_RUN:
@@ -335,7 +332,7 @@ def step3(stager, batch_size_geotiffs=200):
     return "Done step 3."
 
 # @workflow.step(name="Step4_create_webtiles")
-def step4(tile_manager, rasterizer, batch_size_web_tiles=100):
+def step4_webtiles(stager, rasterizer, batch_size_web_tiles=100):
     '''
     STEP 4: Create web tiles from geotiffs
     Infinite parallelism.
@@ -344,8 +341,8 @@ def step4(tile_manager, rasterizer, batch_size_web_tiles=100):
     # Update color ranges
     rasterizer.update_ranges()
 
-    tile_manager.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
-    geotiff_paths = tile_manager.get_filenames_from_dir(base_dir = 'geotiff_path')
+    stager.tiles.add_base_dir('geotiff_path', GEOTIFF_PATH, '.tif')
+    geotiff_paths = stager.tiles.get_filenames_from_dir(base_dir = 'geotiff_path')
 
     if ONLY_SMALL_TEST_RUN:
         geotiff_paths = geotiff_paths[:TEST_RUN_SIZE]
