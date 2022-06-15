@@ -8,18 +8,22 @@ import viz_3dtiles #import Cesium3DTile, Cesium3DTileset
 
 import os
 import ray
-from ray import workflow
+# from ray import workflow
 import time
 import sys
 import traceback
-import socket # for seeing where things run distributed
+import socket # for seeing where jobs run when distributed
 from collections import Counter
 import pathlib
+import json
 
-# Change me 😁  
+#######################
+#### Change me 😁  ####
+#######################
 # ALWAYS include the tailing slash "/"
-BASE_DIR_OF_INPUT = '/home/ray/maple_data/'   # The output data of MAPLE. Which is the input data for STAGING.
-OUTPUT            = '/home/ray/output/'       # Dir for results. High I/O is good.
+BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/'   # The output data of MAPLE. Which is the input data for STAGING.
+FOOTPRINTS_PATH   = BASE_DIR_OF_INPUT + 'footprints/'
+OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/GPU_RUN/'       # Dir for results. High I/O is good.
 # BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
 # OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
@@ -27,18 +31,19 @@ GEOTIFF_PATH      = OUTPUT + 'geotiff/'
 WEBTILE_PATH      = OUTPUT + 'web_tiles/'
 THREE_D_PATH      = OUTPUT + '3d_tiles/'
 
-RAY_ADDRESS       = '141.142.144.140:6379'  # SET ME!! using output from `$ ray start --head --port=6379 --dashboard-port=8265`
+RAY_ADDRESS       = 'ray://172.28.23.105:10001'  # SET ME!! Use output from `$ ray start --head --port=6379 --dashboard-port=8265`
 
 # Convenience for little test runs. Change me 😁  
 ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
-TEST_RUN_SIZE       = 2                              # Number of files to pre processed during testing (only effects testing)
+TEST_RUN_SIZE       = 3_000                              # Number of files to pre processed during testing (only effects testing)
+##############################
+#### END OF Change me 😁  ####
+##############################
 
-# ⛔️ don't change these ⛔️
-IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', 'dir_geotiff': GEOTIFF_PATH, 'dir_web_tiles': WEBTILE_PATH, 'dir_staged': OUTPUT_OF_STAGING, 'filename_staging_summary': OUTPUT_OF_STAGING + 'staging_summary.csv', 'filename_rasterization_events': GEOTIFF_PATH + 'raster_events.csv', 'filename_rasters_summary': GEOTIFF_PATH + 'raster_summary.csv', 'simplify_tolerance': 1e-05, 'tms_id': 'WorldCRS84Quad', 'tile_path_structure': ['style', 'tms', 'z', 'x', 'y'], 'z_range': [0, 13], 'tile_size': [256, 256], 'statistics': [{'name': 'iwp_count', 'weight_by': 'count', 'property': 'centroids_per_pixel', 'aggregation_method': 'sum', 'resampling_method': 'sum', 'val_range': [0, None], 'palette': ['rgb(102 51 153 / 0.1)', '#d93fce', 'lch(85% 100 85)']}, {'name': 'iwp_coverage', 'weight_by': 'area', 'property': 'area_per_pixel_area', 'aggregation_method': 'sum', 'resampling_method': 'average', 'val_range': [0, 1], 'palette': ['rgb(102 51 153 / 0.1)', 'lch(85% 100 85)']}], 'deduplicate_at': ['raster'], 'deduplicate_method': 'neighbor', 'deduplicate_keep_rules': [['Date', 'larger'], ['Time', 'larger']], 'deduplicate_overlap_tolerance': 0, 'deduplicate_overlap_both': False, 'deduplicate_centroid_tolerance': None}
-
-FAILURES = []
-FAILURE_PATHS = []
-IP_ADDRESSES_OF_WORK = []
+##################################
+#### ⛔️ don't change these ⛔️  ####
+##################################
+IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', "dir_footprints": FOOTPRINTS_PATH, 'dir_geotiff': GEOTIFF_PATH, 'dir_web_tiles': WEBTILE_PATH, 'dir_staged': OUTPUT_OF_STAGING, 'filename_staging_summary': OUTPUT_OF_STAGING + 'staging_summary.csv', 'filename_rasterization_events': GEOTIFF_PATH + 'raster_events.csv', 'filename_rasters_summary': GEOTIFF_PATH + 'raster_summary.csv', 'simplify_tolerance': 1e-05, 'tms_id': 'WorldCRS84Quad', 'statistics': [{'name': 'iwp_count', 'weight_by': 'count', 'property': 'centroids_per_pixel', 'aggregation_method': 'sum', 'resampling_method': 'sum', 'val_range': [0, None], 'palette': ['rgb(102 51 153 / 0.0)', '#d93fce', 'lch(85% 100 85)']}, {'name': 'iwp_coverage', 'weight_by': 'area', 'property': 'area_per_pixel_area', 'aggregation_method': 'sum', 'resampling_method': 'average', 'val_range': [0, 1], 'palette': ['rgb(102 51 153 / 0.0)', 'lch(85% 100 85)']}], 'deduplicate_at': ['raster'], 'deduplicate_keep_rules': [['Date', 'larger']], 'deduplicate_method': 'footprints', 'deduplicate_clip_to_footprint': True,  'input_crs': 'EPSG:3413'}
 
 # TODO: return path names instead of 0. 
 # TODO: use logging instead of prints. 
@@ -65,109 +70,100 @@ def main():
         ########## MAIN STEPS ##########
 
         step0_result = step0_staging(stager)           # Staging 
-        print(step0_result)
+        # print(step0_result)
         # step1_3d_tiles(stager)                         # Create 3D tiles from .shp
         # step2_result = step2_raster_highest(stager)                   # rasterize highest Z level only 
         # print(step2_result)                          
         # step3_raster_lower(stager, batch_size_geotiffs=100)         # rasterize all LOWER Z levels
-        # step4_webtiles(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
-
-        
-        # NOT WORKING YET (6/1/22)
-        ########## RAY WORKFLOWS VERSION (same as above) ##########
-
-        # workflow.init(storage="/home/kastanday/~/ray_workflow_storage")
-        # step0_result = step0_staging.step(stager)
-        # step1_result = step1_3d_tiles.step(stager)
-        # setp2_result = step2_raster_highest.step(stager) # rasterize highest Z level
-        # step3_raster_lower(stager, batch_size_geotiffs=100) # rasterize all other Z levels
-        # step4_webtiles(stager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.
-
-        # RUN WORKFLOW
-        
-        # workflow_id = make_workflow_id('first_test_step_0') # add arbitrary human-readable name
-        # step0_result.run(workflow_id)
-        # print("Workflow status is: " + workflow.get_status(workflow_id=workflow_id))
-        
+        # step4_webtiles(tile_manager, rasterizer, batch_size_web_tiles=100) # convert to web tiles.        
 
     except Exception as e:
-        print(f"Caught error in main: {str(e)}", "\nTraceback", traceback.print_exc())
+        print(f"Caught error in main(): {str(e)}", "\nTraceback", traceback.print_exc())
     finally:
         # cancel work. shutdown ray.
         print(f"Runtime: {(time.time() - start)/60:.2f} minutes")
         ray.shutdown()
         assert ray.is_initialized() == False
 
-############### MAIN STEPS ###############
+############### 👇 MAIN STEPS FUNCTIONS 👇 ###############
 
 # @workflow.step(name="Step0_Stage_All")
 def step0_staging(stager):
+    FAILURES = []
+    FAILURE_PATHS = []
+    IP_ADDRESSES_OF_WORK = []
+    app_futures = []
     start = time.time()
-
-    ids = []
-    stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
-    staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
-
-    if ONLY_SMALL_TEST_RUN:
-        staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
     
-    print("number of items", len(staging_input_files_list))
+    # print at start of staging
+    print(f'''This cluster consists of
+        {len(ray.nodes())} nodes in total
+        {ray.cluster_resources()['CPU']} CPU cores in total
+        {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total
+    ''')
+    if ('GPU' in str(ray.cluster_resources())):
+        print(f"{ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
+    
+    # OLD METHOD "glob" all files. 
+    # stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
+    # staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
+    
+    # Input files! Now we use a list of files ('iwp-file-list.json')
+    try:
+        staging_input_files_list = json.load(open('./exist_files_relative.json'))
+    except FileNotFoundError as e:
+        print("Hey you, please specify a json file containing a list of input file paths (relative to `BASE_DIR_OF_INPUT`).", e)
+    
+    if ONLY_SMALL_TEST_RUN: # for testing only
+        staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
 
     # catch kill signal to shutdown on command (ctrl + c)
     try: 
-        # START REMOTE FUNCTIONS
-        for filepath in staging_input_files_list: # [40:45] -- FOR SHORTER RUNS
-            print(f"Starting remote function for {filepath}")
-            IWP_CONFIG['dir_input'] = filepath
-            ids.append(stage_remote.remote(IWP_CONFIG))
-
-        # print at start of staging
+        # batch_size = 20
+        # staged_batches = make_batch(staging_input_files_list, batch_size)
+        
+        # Create queue of 'REMOTE' FUNCTIONS
         print(f"\n\n👉 Staging {len(staging_input_files_list)} files in parallel 👈\n\n")
-        print(f'''This cluster consists of
-            {len(ray.nodes())} nodes in total
-            {ray.cluster_resources()['CPU']} CPU cores in total
-            {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total
-        ''')
-        # if (ray.cluster_resources()['GPU']):
-        #     print(f"{ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
+        for filepath in staging_input_files_list:
+            filepath = os.path.join(BASE_DIR_OF_INPUT, filepath)
+            app_futures.append(stage_remote.remote(filepath))
 
         # BLOCKING - WAIT FOR REMOTE FUNCTIONS TO FINISH
-        for i in range(0, len(ids)): 
-            # ray.wait(ids) catches ONE at a time. 
-            ready, not_ready = ray.wait(ids)
+        for i in range(0, len(app_futures)): 
+            # ray.wait(app_futures) catches ONE at a time. 
+            ready, not_ready = ray.wait(app_futures) # todo , fetch_local=False do not download object from remote nodes
 
             # check for failures
-            if any(err in ray.get(ready)[0] for err in ["FAILED", "Failed", "❌"]):
-                FAILURES.append(ray.get(ready)[0])
-                print(f"❌ Failed {ray.get(ready)}")
+            if any(err in ray.get(ready)[0][0] for err in ["FAILED", "Failed", "❌"]):
+                FAILURES.append([ray.get(ready)[0][0], ray.get(ready)[0][1]])
+                print(f"❌ Failed {ray.get(ready)[0][0]}")
                 IP_ADDRESSES_OF_WORK.append(ray.get(ready)[0][1])
             else:
                 # success case
                 print(f"✅ Finished {ray.get(ready)[0][0]}")
+                print(f"📌 Completed {i+1} of {len(staging_input_files_list)}, {(i+1)/len(staging_input_files_list)*100:.1f}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
                 IP_ADDRESSES_OF_WORK.append(ray.get(ready)[0][1])
 
-
-            # print FINAL stats about Staging 
-            print(f"📌 Completed {i+1} of {len(staging_input_files_list)}")
-            print(f"⏰ Running total of elapsed time: {(time.time() - start)/60:.2f} minutes\n")
-            ids = not_ready
-            if not ids:
+            app_futures = not_ready
+            if not app_futures:
                 break
     except Exception as e:
-        print(f"Cauth error in Head-node loop: {str(e)}")
+        print(f"Cauth error in Staging (step_0): {str(e)}")
     finally:
-        print(FAILURES)
-        print(FAILURE_PATHS)
+        # print FINAL stats about Staging 
+        print(f"📌 Completed {i+1} of {len(staging_input_files_list)}")
+        print(f"Runtime: {(time.time() - start)/60:.2f} minutes\n")        
+        for failure in FAILURES: print(failure) # for pretty-print newlines
         print(f"Number of failures = {len(FAILURES)}")
-        print("☝️ ☝️ ☝️ I'm not properly catching all the failures")
-        print(f"Runtime: {(time.time() - start)/60:.2f} minutes\n")
-        print(f"\n\n👉 Staging {len(staging_input_files_list)} files in parallel 👈\n\n")
-
         print("Which nodes were used?")
         for ip_address, num_tasks in Counter(IP_ADDRESSES_OF_WORK).items():
             print('    {} tasks on {}'.format(num_tasks, ip_address))
-        
         return "😁 step 1 success"
+
+# todo: refactor for a uniform function to check for failures
+def check_for_failures():
+    # need to append to FAILURES list and FAILURE_PATHS list, and IP_ADDRESSES_OF_WORK list
+    pass
 
 # @workflow.step(name="Step1_3D_Tiles")
 def step1_3d_tiles(stager):
@@ -185,14 +181,14 @@ def step1_3d_tiles(stager):
 
         # START JOBS
         start = time.time()
-        ids = []
+        app_futures = []
         for filepath in staged_files_list:
             filename, save_to_dir = build_filepath(filepath)
-            ids.append(three_d_tile.remote(filepath, filename, save_to_dir))
+            app_futures.append(three_d_tile.remote(filepath, filename, save_to_dir))
 
         # get 3D tiles, send to Tileset
         for i in range(0,len(staged_files_list)): 
-            ready, not_ready = ray.wait(ids)
+            ready, not_ready = ray.wait(app_futures)
             
             # Check for failures
             if any(err in ray.get(ready)[0][0] for err in ["FAILED", "Failed", "❌"]):
@@ -205,8 +201,8 @@ def step1_3d_tiles(stager):
                 print(f"📌 Completed {i+1} of {len(staged_files_list)}, {(i+1)/len(staged_files_list)*100}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
                 IP_ADDRESSES_OF_WORK_3D_TILES.append(ray.get(ready)[0][1])
 
-            ids = not_ready
-            if not ids:
+            app_futures = not_ready
+            if not app_futures:
                 break
             
     except Exception as e:
