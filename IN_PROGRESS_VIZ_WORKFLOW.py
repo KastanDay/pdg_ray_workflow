@@ -1,4 +1,5 @@
 
+from copy import deepcopy
 import logging
 import logging.config
 
@@ -20,18 +21,18 @@ import json
 #######################
 #### Change me 😁  ####
 #######################
+RAY_ADDRESS       = 'ray://172.28.23.105:10001'  # SET ME!! Use output from `$ ray start --head --port=6379 --dashboard-port=8265`
+
 # ALWAYS include the tailing slash "/"
 BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/'   # The output data of MAPLE. Which is the input data for STAGING.
 FOOTPRINTS_PATH   = BASE_DIR_OF_INPUT + 'footprints/'
-OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/GPU_RUN/'       # Dir for results. High I/O is good.
+OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/placement_groups/'       # Dir for results. High I/O is good.
 # BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
 # OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
 GEOTIFF_PATH      = OUTPUT + 'geotiff/'
 WEBTILE_PATH      = OUTPUT + 'web_tiles/'
 THREE_D_PATH      = OUTPUT + '3d_tiles/'
-
-RAY_ADDRESS       = 'ray://172.28.23.105:10001'  # SET ME!! Use output from `$ ray start --head --port=6379 --dashboard-port=8265`
 
 # Convenience for little test runs. Change me 😁  
 ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
@@ -49,13 +50,17 @@ IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', "dir_footprin
 # TODO: use logging instead of prints. 
 
 def main():
-    ray.shutdown()
-    assert ray.is_initialized() == False
+    # ray.shutdown()
+    # assert ray.is_initialized() == False
     ray.init(address=RAY_ADDRESS, dashboard_port=8265)   # most reliable way to start Ray
+    # doesn’t work: _internal_config=json.dumps({"worker_register_timeout_seconds": 120}) 
     # use port-forwarding to see dashboard: `ssh -L 8265:localhost:8265 kastanday@kingfisher.ncsa.illinois.edu`
     # ray.init(address='auto')                                    # multinode, but less reliable than above.
     # ray.init()                                                  # single-node only!
     assert ray.is_initialized() == True
+    
+    print("🎯 Ray initialized.")
+    print_cluster_stats()
 
     # instantiate classes for their helper functions
     rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
@@ -63,13 +68,13 @@ def main():
     # tile_manager = stager.tiles
     # config_manager = stager.config
     start = time.time()
-
     
     # (optionally) CHANGE ME, if you only want certain steps 😁
     try:
         ########## MAIN STEPS ##########
 
-        step0_result = step0_staging(stager)           # Staging 
+        # step0_result = step0_staging(stager)           # Staging 
+        step0_staging_actor_placement_group(stager)
         # print(step0_result)
         # step1_3d_tiles(stager)                         # Create 3D tiles from .shp
         # step2_result = step2_raster_highest(stager)                   # rasterize highest Z level only 
@@ -89,20 +94,23 @@ def main():
 
 # @workflow.step(name="Step0_Stage_All")
 def step0_staging(stager):
+    from copy import deepcopy
+    
     FAILURES = []
     FAILURE_PATHS = []
     IP_ADDRESSES_OF_WORK = []
     app_futures = []
     start = time.time()
     
+    print("Querying size of Ray cluster...\n")
+    
     # print at start of staging
     print(f'''This cluster consists of
         {len(ray.nodes())} nodes in total
         {ray.cluster_resources()['CPU']} CPU cores in total
-        {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total
-    ''')
+        {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total''')
     if ('GPU' in str(ray.cluster_resources())):
-        print(f"{ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
+        print(f"        {ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
     
     # OLD METHOD "glob" all files. 
     # stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
@@ -110,25 +118,32 @@ def step0_staging(stager):
     
     # Input files! Now we use a list of files ('iwp-file-list.json')
     try:
-        staging_input_files_list = json.load(open('./exist_files_relative.json'))
+        staging_input_files_list_raw = json.load(open('./exist_files_relative.json'))
     except FileNotFoundError as e:
         print("Hey you, please specify a json file containing a list of input file paths (relative to `BASE_DIR_OF_INPUT`).", e)
     
     if ONLY_SMALL_TEST_RUN: # for testing only
-        staging_input_files_list = staging_input_files_list[:TEST_RUN_SIZE]
+        staging_input_files_list_raw = staging_input_files_list_raw[:TEST_RUN_SIZE]
 
+    # make paths absolute 
+    # todo refactor
+    staging_input_files_list = []
+    for filepath in staging_input_files_list_raw:
+        filepath = os.path.join(BASE_DIR_OF_INPUT, filepath)
+        staging_input_files_list.append(filepath)
+    
     # catch kill signal to shutdown on command (ctrl + c)
     try: 
-        # batch_size = 20
+        # batch_size = 5
         # staged_batches = make_batch(staging_input_files_list, batch_size)
         
         # Create queue of 'REMOTE' FUNCTIONS
         print(f"\n\n👉 Staging {len(staging_input_files_list)} files in parallel 👈\n\n")
-        for filepath in staging_input_files_list:
-            filepath = os.path.join(BASE_DIR_OF_INPUT, filepath)
+        for filepath in staging_input_files_list:    
+            # create list of remote function ids (i.e. futures)
             app_futures.append(stage_remote.remote(filepath))
 
-        # BLOCKING - WAIT FOR REMOTE FUNCTIONS TO FINISH
+        # BLOCKING - WAIT FOR *ALL* REMOTE FUNCTIONS TO FINISH
         for i in range(0, len(app_futures)): 
             # ray.wait(app_futures) catches ONE at a time. 
             ready, not_ready = ray.wait(app_futures) # todo , fetch_local=False do not download object from remote nodes
@@ -164,6 +179,140 @@ def step0_staging(stager):
 def check_for_failures():
     # need to append to FAILURES list and FAILURE_PATHS list, and IP_ADDRESSES_OF_WORK list
     pass
+
+'''
+A new strategy of using Actors and placement groups.
+'''
+
+@ray.remote
+class SubmitActor:
+    def __init__(self):
+        pass
+
+    def submit_jobs(self, filepath_batch, pg):
+        print("submitting a batch of jobs")
+        app_futures = []
+        for filepath in filepath_batch:
+            # filepath = /path/to/file1.shp
+            app_futures.append(stage_remote.options(placement_group=pg).remote(filepath))
+        return app_futures
+
+def start_actors_staging(staging_input_files_list):
+    from ray.util.placement_group import placement_group
+
+    num_submission_actors = 14 # pick num concurrent submitters -- MUST BE EQUAL TO NUM UNIQUE WORKER! NODES!!!! 
+    pg = placement_group([{"CPU": 64}] * num_submission_actors, strategy="STRICT_SPREAD") # strategy="STRICT_SPREAD"
+    ray.get(pg.ready()) # wait for it to be ready
+    
+    submit_actors = [SubmitActor.options(placement_group=pg).remote() for _ in range(num_submission_actors)]
+    filepath_batches = make_batch(staging_input_files_list, batch_size=30) # sharding the files
+    
+    print("total filepath batches: ", len(filepath_batches), "<-- total number of jobs to submit")
+    print("total submit_actors: ", len(submit_actors), "<-- expect this many CPUs utilized")
+
+    app_futures = []
+    for i, filepath_batch in enumerate(filepath_batches[0:num_submission_actors]): # TODO: fix to do all batches. Using queue?
+        # BLOCKING: Limit in-flight calls to number of submitter CPUs.
+        if len(app_futures) >= num_submission_actors:
+            print("Waiting for in-flight calls to finish...")
+            num_ready = i-num_submission_actors
+            ray.wait(app_futures, num_returns=num_ready)
+        
+        print("Submitting batch {} of {}".format(i+1, len(filepath_batches)))
+        # start a submitter-actor on a batch of filepaths.
+        app_futures.append(submit_actors[i].submit_jobs.remote(filepath_batch, pg))
+        
+    # wait for results
+    print("num returns: ", len(filepath_batches[0:num_submission_actors]))
+    ready, not_ready = ray.wait(app_futures, num_returns=len(filepath_batches[0:num_submission_actors]))
+    # print
+    try:
+        for batch_return in ready:
+            if type(batch_return) is list:
+                for future in batch_return:
+                    if type(future) is list:
+                        for third_loop in future:
+                            try:
+                                print("in 3rd loop")
+                                print(ray.get(third_loop))
+                            except Exception as e:
+                                print(e)  
+                    else:
+                        print(ray.get(future))
+            else:
+                print("in non list type")
+                all_returns = ray.get(batch_return)
+                print("all_returns:")
+                print(all_returns)
+                for return_val in all_returns:
+                    print("return val in all_returns loop:")
+                    things = ray.get(return_val)
+                    print("the invidiaul returnn val")
+                    print(things)
+            
+            # for actual in batch_return:
+            #     print(ray.get(actual))
+        print("num ready returns:", len(ready))
+    except Exception as e:
+        print("Failed during prints, lol. ", e)
+    
+    return
+
+def print_cluster_stats():
+    print("Querying size of Ray cluster...\n")
+
+    # print at start of staging
+    print(f'''This cluster consists of
+        {len(ray.nodes())} nodes in total
+        {ray.cluster_resources()['CPU']} CPU cores in total
+        {ray.cluster_resources()['memory']/1e9:.2f} GB CPU memory in total''')
+    if ('GPU' in str(ray.cluster_resources())):
+        print(f"        {ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
+
+# @workflow.step(name="Step0_Stage_All")
+def step0_staging_actor_placement_group(stager):
+    from copy import deepcopy
+    
+    FAILURES = []
+    FAILURE_PATHS = []
+    IP_ADDRESSES_OF_WORK = []
+    app_futures = []
+    start = time.time()
+    
+    # OLD METHOD "glob" all files. 
+    # stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
+    # staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
+    
+    # Input files! Now we use a list of files ('iwp-file-list.json')
+    try:
+        staging_input_files_list_raw = json.load(open('./exist_files_relative.json'))
+    except FileNotFoundError as e:
+        print("Hey you, please specify a json file containing a list of input file paths (relative to `BASE_DIR_OF_INPUT`).", e)
+    
+    if ONLY_SMALL_TEST_RUN: # for testing only
+        staging_input_files_list_raw = staging_input_files_list_raw[:TEST_RUN_SIZE]
+
+    # make paths absolute 
+    # todo refactor
+    staging_input_files_list = []
+    for filepath in staging_input_files_list_raw:
+        filepath = os.path.join(BASE_DIR_OF_INPUT, filepath)
+        staging_input_files_list.append(filepath)
+    
+    
+    # start actors!
+    start_actors_staging(staging_input_files_list)
+    
+    # catch kill signal to shutdown on command (ctrl + c)
+    try: 
+        
+        pass
+        
+    except Exception as e:
+        print(f"Cauth error in Staging actor placement groups (step_0): {str(e)}")
+    finally:
+        return "😁 step 1 is done. Who knows about success."
+
 
 # @workflow.step(name="Step1_3D_Tiles")
 def step1_3d_tiles(stager):
@@ -441,20 +590,25 @@ def make_batch(items, batch_size):
     """
     return [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
 
+# @ray.remote(num_cpus=0.5, memory=5_000_000_000, scheduling_strategy="SPREAD")
 @ray.remote
-def stage_remote(config_path):
+def stage_remote(filepath):
     """
     Step 1. 
     Parallelism at the per-shape-file level.
     """
+    # deepcopy makes a realy copy, not using references. Helpful for parallelism.
+    config_path = deepcopy(IWP_CONFIG)
+    
     try: 
+        config_path['dir_input'] = filepath
         stager = pdgstaging.TileStager(config_path)
         # stager.stage_all()
         stager.stage(config_path['dir_input'])
     except Exception as e:
-        # traceback.print_exc()
-        return [f"‼️ ‼️ ❌ ❌ ❌ ❌ -- THIS TASK FAILED ❌ ❌ ❌ ❌ ‼️ ‼️ with path: {config_path['dir_input']} and \nError: {e}\nTraceback {traceback.print_exc()}", 
+        return [f"‼️ ‼️ ❌ ❌ ❌ ❌ -- THIS TASK FAILED ❌ ❌ ❌ ❌ ‼️ ‼️ with path: {config_path['dir_input']}\nError: {e}\nTraceback {traceback.print_exc()}", 
             socket.gethostbyname(socket.gethostname())]
+        
     return [f"Done stage_remote w/ config_path: {config_path['dir_input']}", 
         socket.gethostbyname(socket.gethostname())]
 
