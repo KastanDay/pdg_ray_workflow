@@ -26,7 +26,7 @@ RAY_ADDRESS       = 'ray://172.28.23.105:10001'  # SET ME!! Use output from `$ r
 # ALWAYS include the tailing slash "/"
 BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/'   # The output data of MAPLE. Which is the input data for STAGING.
 FOOTPRINTS_PATH   = BASE_DIR_OF_INPUT + 'footprints/'
-OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/placement_groups/'       # Dir for results. High I/O is good.
+OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/end_of_friday_v2/'       # Dir for results. High I/O is good.
 # BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
 # OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
@@ -35,7 +35,7 @@ WEBTILE_PATH      = OUTPUT + 'web_tiles/'
 THREE_D_PATH      = OUTPUT + '3d_tiles/'
 
 # Convenience for little test runs. Change me 😁  
-ONLY_SMALL_TEST_RUN = True                          # For testing, this ensures only a small handful of files are processed.
+ONLY_SMALL_TEST_RUN = False                          # For testing, this ensures only a small handful of files are processed.
 TEST_RUN_SIZE       = 3_000                              # Number of files to pre processed during testing (only effects testing)
 ##############################
 #### END OF Change me 😁  ####
@@ -63,8 +63,8 @@ def main():
     print_cluster_stats()
 
     # instantiate classes for their helper functions
-    rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
-    stager = pdgstaging.TileStager(IWP_CONFIG)
+    # rasterizer = pdgraster.RasterTiler(IWP_CONFIG)
+    # stager = pdgstaging.TileStager(IWP_CONFIG)
     # tile_manager = stager.tiles
     # config_manager = stager.config
     start = time.time()
@@ -74,7 +74,7 @@ def main():
         ########## MAIN STEPS ##########
 
         # step0_result = step0_staging(stager)           # Staging 
-        step0_staging_actor_placement_group(stager)
+        step0_staging_actor_placement_group()
         # print(step0_result)
         # step1_3d_tiles(stager)                         # Create 3D tiles from .shp
         # step2_result = step2_raster_highest(stager)                   # rasterize highest Z level only 
@@ -186,75 +186,176 @@ A new strategy of using Actors and placement groups.
 
 @ray.remote
 class SubmitActor:
-    def __init__(self):
-        pass
+    def __init__(self, work_queue, pg):
+        self.pg = pg
+        self.work_queue = work_queue  # work_queue.get() == filepath_batch
+        
+        # Run work
+        # self.submit_jobs()
 
-    def submit_jobs(self, filepath_batch, pg):
+    def submit_jobs(self):
         print("submitting a batch of jobs")
-        app_futures = []
-        for filepath in filepath_batch:
-            # filepath = /path/to/file1.shp
-            app_futures.append(stage_remote.options(placement_group=pg).remote(filepath))
-        return app_futures
+        
+        print(f"📌 Submitting {self.work_queue.size()} jobs to {self.pg}")
+        
+        FAILURES = []
+        IP_ADDRESSES_OF_WORK = []
+        
+        while not self.work_queue.empty():
+            # Get work from the queue.
+            self.filepath_batch = self.work_queue.get()
+            
+            ##########################################################
+            ##################### SCHEDULE TASKS #####################
+            ##########################################################
+            app_futures = []
+            for filepath in self.filepath_batch:
+                # filepath = /path/to/file1.shp
+                app_futures.append(stage_remote.options(placement_group=self.pg).remote(filepath))
+
+            ##########################################################
+            ##################### GET REULTS #########################
+            ##########################################################
+            # print(ray.get(app_futures))
+            # for _ in range(0, len(app_futures)):
+            #     ready, not_ready = ray.wait(app_futures) # catches one at a time.
+            #     try:
+            #         print("PRINTING READY individual task:", ready)
+            #         print(ray.get(ready))
+            #         # print("num ready: ", len(ready), "and inner length: ", len(ready[0]))
+            #     except Exception as e:
+            #         print("Error in printing ready actors: ", e)
+            
+            for i in range(0, len(app_futures)): 
+                # ray.wait(app_futures) catches ONE at a time. 
+                ready, not_ready = ray.wait(app_futures) # todo , fetch_local=False do not download object from remote nodes
+
+                # check for failures
+                if any(err in ray.get(ready)[0][0] for err in ["FAILED", "Failed", "❌"]):
+                    FAILURES.append([ray.get(ready)[0][0], ray.get(ready)[0][1]])
+                    print(f"❌ Failed {ray.get(ready)[0][0]}")
+                    IP_ADDRESSES_OF_WORK.append(ray.get(ready)[0][1])
+                else:
+                    # success case
+                    print(f"✅ Finished {ray.get(ready)[0][0]}")
+                    # print(f"📌 Completed {i+1} of {len(staging_input_files_list)}, {(i+1)/len(staging_input_files_list)*100:.1f}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
+                    IP_ADDRESSES_OF_WORK.append(ray.get(ready)[0][1])
+
+                app_futures = not_ready
+                if not app_futures:
+                    break
+        
+        return [FAILURES, IP_ADDRESSES_OF_WORK]
+                
+            
 
 def start_actors_staging(staging_input_files_list):
     from ray.util.placement_group import placement_group
-
-    num_submission_actors = 14 # pick num concurrent submitters -- MUST BE EQUAL TO NUM UNIQUE WORKER! NODES!!!! 
-    pg = placement_group([{"CPU": 64}] * num_submission_actors, strategy="STRICT_SPREAD") # strategy="STRICT_SPREAD"
-    ray.get(pg.ready()) # wait for it to be ready
     
-    submit_actors = [SubmitActor.options(placement_group=pg).remote() for _ in range(num_submission_actors)]
-    filepath_batches = make_batch(staging_input_files_list, batch_size=30) # sharding the files
+    print("\n\n👉 Starting Staging with Placement Group Actors (step_0) 👈\n\n")
+
+    ################### CHANGE THESE SETTINGS FOR PARALLELISM ###########################
+    num_submission_actors = 75 # pick num concurrent submitters -- MUST BE EQUAL TO NUM UNIQUE WORKER! NODES!!!! 
+    filepath_batches = make_batch(staging_input_files_list, batch_size=20)
+    pg = placement_group([{"CPU": 20}] * num_submission_actors, strategy="SPREAD") # strategy="STRICT_SPREAD"
+    ray.get(pg.ready()) # wait for it to be ready
+
+    # 1. put files in queue. 
+    from ray.util.queue import Queue
+    work_queue = Queue()
+    for filepath_batch in filepath_batches:
+        work_queue.put(filepath_batch)
+        
+    # 1. put files in queue. 
+    # 2. pass queue to each worker. 
+    # 3. workers just pull next thing from queue till it's empty. Then they all gracefully exit. 
+        # ^ this happens in the actor class.
+    
+    # 2. 
+    # create actors (one per node?? Maybe... reduce that. Disable STRICT spread, do regular spread.)
+    submit_actors = [SubmitActor.options(placement_group=pg).remote(work_queue, pg) for _ in range(num_submission_actors)]
     
     print("total filepath batches: ", len(filepath_batches), "<-- total number of jobs to submit")
     print("total submit_actors: ", len(submit_actors), "<-- expect this many CPUs utilized")
-
+    
+    # start jobs
     app_futures = []
-    for i, filepath_batch in enumerate(filepath_batches[0:num_submission_actors]): # TODO: fix to do all batches. Using queue?
-        # BLOCKING: Limit in-flight calls to number of submitter CPUs.
-        if len(app_futures) >= num_submission_actors:
-            print("Waiting for in-flight calls to finish...")
-            num_ready = i-num_submission_actors
-            ray.wait(app_futures, num_returns=num_ready)
+    for actor in submit_actors:
+        app_futures.append(actor.submit_jobs.remote())
+    
+    for i in range(0, len(submit_actors)): 
+        ready, not_ready = ray.wait(app_futures)
+        print("PRINTING READY individual task:", ray.get(ready))
+    
         
-        print("Submitting batch {} of {}".format(i+1, len(filepath_batches)))
-        # start a submitter-actor on a batch of filepaths.
-        app_futures.append(submit_actors[i].submit_jobs.remote(filepath_batch, pg))
         
-    # wait for results
-    print("num returns: ", len(filepath_batches[0:num_submission_actors]))
-    ready, not_ready = ray.wait(app_futures, num_returns=len(filepath_batches[0:num_submission_actors]))
-    # print
-    try:
-        for batch_return in ready:
-            if type(batch_return) is list:
-                for future in batch_return:
-                    if type(future) is list:
-                        for third_loop in future:
-                            try:
-                                print("in 3rd loop")
-                                print(ray.get(third_loop))
-                            except Exception as e:
-                                print(e)  
-                    else:
-                        print(ray.get(future))
-            else:
-                print("in non list type")
-                all_returns = ray.get(batch_return)
-                print("all_returns:")
-                print(all_returns)
-                for return_val in all_returns:
-                    print("return val in all_returns loop:")
-                    things = ray.get(return_val)
-                    print("the invidiaul returnn val")
-                    print(things)
-            
-            # for actual in batch_return:
-            #     print(ray.get(actual))
-        print("num ready returns:", len(ready))
-    except Exception as e:
-        print("Failed during prints, lol. ", e)
+    # ray.wait(submit_actors, num_returns=len(submit_actors))
+    
+    
+        
+    # while q.has_next():
+    #     # submit job to actor. 
+    #     print(list(pool.map(lambda a, v: a.double.remote(v),
+    #         [1, 2, 3, 4]))) 
+    
+
+    
+    ##########################################################
+    ##################### SCHEDULE TASKS #####################
+    ##########################################################
+    # app_futures = []
+    # for i, filepath_batch in enumerate(filepath_batches): # TODO: fix to do all batches. Using queue?
+        
+    #     # BLOCKING: Limit in-flight calls to number of submitter CPUs.
+    #     if len(app_futures) >= num_submission_actors:
+    #         print("Waiting for in-flight calls to finish...")
+    #         num_ready = i-num_submission_actors
+    #         print("Num_ready!???", num_ready)
+    #         ready, not_ready = ray.wait(app_futures) # catches one at a time.
+    #         try:
+    #             print("PRINTING READY ACTORS:", ready)
+    #             print(ray.get(ready))
+    #             print("num ready: ", len(ready), "and inner length: ", len(ready[0]))
+    #         except Exception as e:
+    #             print("Error in printing ready actors: ", e)
+        
+    #     print("Submitting batch {} of {}".format(i+1, len(filepath_batches)))
+    #     # start a submitter-actor on a batch of filepaths.
+    #     app_futures.append(submit_actors[i].submit_jobs.remote(filepath_batch, pg))
+        
+        
+    ########### GET RESULTS ###########
+    # print("num returns: ", len(filepath_batches))
+    # ready, not_ready = ray.wait(app_futures, num_returns=len(filepath_batches))
+    # # print
+    # try:
+    #     for batch_return in ready:
+    #         if type(batch_return) is list:
+    #             for future in batch_return:
+    #                 if type(future) is list:
+    #                     for third_loop in future:
+    #                         try:
+    #                             print("in 3rd loop")
+    #                             print(ray.get(third_loop))
+    #                         except Exception as e:
+    #                             print(e)  
+    #                 else:
+    #                     print(ray.get(future))
+    #         else:
+    #             print("in non list type")
+    #             all_returns = ray.get(batch_return)
+    #             print("all_returns:")
+    #             print(all_returns)
+    #             for return_val in all_returns:
+    #                 print("return val in all_returns loop:")
+    #                 things = ray.get(return_val)
+    #                 print("the invidiaul returnn val")
+    #                 print(things)
+    #         # for actual in batch_return:
+    #         #     print(ray.get(actual))
+    #     print("num ready returns:", len(ready))
+    # except Exception as e:
+    #     print("Failed during prints, lol. ", e)
     
     return
 
@@ -270,7 +371,7 @@ def print_cluster_stats():
         print(f"        {ray.cluster_resources()['GPU']} GRAPHICCSSZZ cards in total")
 
 # @workflow.step(name="Step0_Stage_All")
-def step0_staging_actor_placement_group(stager):
+def step0_staging_actor_placement_group():
     from copy import deepcopy
     
     FAILURES = []
