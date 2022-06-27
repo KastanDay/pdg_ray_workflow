@@ -1,22 +1,21 @@
 
-from copy import deepcopy
+import json
 import logging
 import logging.config
-
-import pdgstaging  # For staging
-import pdgraster
-import viz_3dtiles #import Cesium3DTile, Cesium3DTileset
-
 import os
-import ray
+import pathlib
+import socket  # for seeing where jobs run when distributed
+import sys
 # from ray import workflow
 import time
-import sys
 import traceback
-import socket # for seeing where jobs run when distributed
 from collections import Counter
-import pathlib
-import json
+from copy import deepcopy
+
+import pdgraster
+import pdgstaging  # For staging
+import ray
+import viz_3dtiles  # import Cesium3DTile, Cesium3DTileset
 
 #######################
 #### Change me 😁  ####
@@ -26,7 +25,7 @@ RAY_ADDRESS       = 'ray://172.28.23.105:10001'  # SET ME!! Use output from `$ r
 # ALWAYS include the tailing slash "/"
 BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/'   # The output data of MAPLE. Which is the input data for STAGING.
 FOOTPRINTS_PATH   = BASE_DIR_OF_INPUT + 'footprints/'
-OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/end_of_friday_v2/'       # Dir for results. High I/O is good.
+OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output/monday_v1/'       # Dir for results. High I/O is good.
 # BASE_DIR_OF_INPUT = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs'                  # The output data of MAPLE. Which is the input data for STAGING.
 # OUTPUT            = '/scratch/bbki/kastanday/maple_data_xsede_bridges2/outputs/viz_output'       # Dir for results. High I/O is good.
 OUTPUT_OF_STAGING = OUTPUT + 'staged/'              # Output dirs for each sub-step
@@ -45,6 +44,9 @@ TEST_RUN_SIZE       = 3_000                              # Number of files to pr
 #### ⛔️ don't change these ⛔️  ####
 ##################################
 IWP_CONFIG = {'dir_input': BASE_DIR_OF_INPUT, 'ext_input': '.shp', "dir_footprints": FOOTPRINTS_PATH, 'dir_geotiff': GEOTIFF_PATH, 'dir_web_tiles': WEBTILE_PATH, 'dir_staged': OUTPUT_OF_STAGING, 'filename_staging_summary': OUTPUT_OF_STAGING + 'staging_summary.csv', 'filename_rasterization_events': GEOTIFF_PATH + 'raster_events.csv', 'filename_rasters_summary': GEOTIFF_PATH + 'raster_summary.csv', 'simplify_tolerance': 1e-05, 'tms_id': 'WorldCRS84Quad', 'statistics': [{'name': 'iwp_count', 'weight_by': 'count', 'property': 'centroids_per_pixel', 'aggregation_method': 'sum', 'resampling_method': 'sum', 'val_range': [0, None], 'palette': ['rgb(102 51 153 / 0.0)', '#d93fce', 'lch(85% 100 85)']}, {'name': 'iwp_coverage', 'weight_by': 'area', 'property': 'area_per_pixel_area', 'aggregation_method': 'sum', 'resampling_method': 'average', 'val_range': [0, 1], 'palette': ['rgb(102 51 153 / 0.0)', 'lch(85% 100 85)']}], 'deduplicate_at': ['raster'], 'deduplicate_keep_rules': [['Date', 'larger']], 'deduplicate_method': 'footprints', 'deduplicate_clip_to_footprint': True,  'input_crs': 'EPSG:3413'}
+
+# total num input files to Staging
+LEN_STAGING_FILES_LIST = 0
 
 # TODO: return path names instead of 0. 
 # TODO: use logging instead of prints. 
@@ -180,15 +182,20 @@ def check_for_failures():
     # need to append to FAILURES list and FAILURE_PATHS list, and IP_ADDRESSES_OF_WORK list
     pass
 
-'''
-A new strategy of using Actors and placement groups.
-'''
 
 @ray.remote
 class SubmitActor:
-    def __init__(self, work_queue, pg):
+    '''
+    A new strategy of using Actors and placement groups.
+
+    Create one universal queue of batches of tasks. Pass a reference to each actor (to store as a class variable).
+    Then each actor just pulls from the queue until it's empty. 
+    '''
+
+    def __init__(self, work_queue, pg, start_time):
         self.pg = pg
         self.work_queue = work_queue  # work_queue.get() == filepath_batch
+        self.start_time = start_time
         
         # Run work
         # self.submit_jobs()
@@ -238,7 +245,8 @@ class SubmitActor:
                 else:
                     # success case
                     print(f"✅ Finished {ray.get(ready)[0][0]}")
-                    # print(f"📌 Completed {i+1} of {len(staging_input_files_list)}, {(i+1)/len(staging_input_files_list)*100:.1f}%, ⏰ Elapsed time: {(time.time() - start)/60:.2f} min\n")
+                    print(f"Failures (in this actor) = {len(FAILURES)}")
+                    print(f"📌 Completed {i+1} of {LEN_STAGING_FILES_LIST}, {(i+1)/LEN_STAGING_FILES_LIST*100:.1f}%, ⏰ Elapsed time: {(time.time() - self.start_time)/60:.2f} min\n")
                     IP_ADDRESSES_OF_WORK.append(ray.get(ready)[0][1])
 
                 app_futures = not_ready
@@ -246,18 +254,28 @@ class SubmitActor:
                     break
         
         return [FAILURES, IP_ADDRESSES_OF_WORK]
-                
-            
 
 def start_actors_staging(staging_input_files_list):
+    '''
+    1. put all filepaths-to-be-staged in queue. 
+    2. pass a reference to the queue to each actor. 
+    3. Actors just pull next thing from queue till it's empty. Then they all gracefully exit. 
+        ^ this happens in the actor class.
+    4. Collect summary results from each actor class
+    '''
     from ray.util.placement_group import placement_group
     
     print("\n\n👉 Starting Staging with Placement Group Actors (step_0) 👈\n\n")
+        
 
-    ################### CHANGE THESE SETTINGS FOR PARALLELISM ###########################
-    num_submission_actors = 75 # pick num concurrent submitters -- MUST BE EQUAL TO NUM UNIQUE WORKER! NODES!!!! 
-    filepath_batches = make_batch(staging_input_files_list, batch_size=20)
-    pg = placement_group([{"CPU": 20}] * num_submission_actors, strategy="SPREAD") # strategy="STRICT_SPREAD"
+    ################### CHANGE THESE SETTINGS FOR PARALLELISM ###############################
+    num_submission_actors = 900 # pick num concurrent submitters. 
+    num_cpu_per_actor = 1
+    batch_size = 5
+    ################### ^ CHANGE THESE SETTINGS FOR PARALLELISM ^ ###########################
+    
+    filepath_batches = make_batch(staging_input_files_list, batch_size=batch_size)
+    pg = placement_group([{"CPU": num_cpu_per_actor}] * num_submission_actors, strategy="SPREAD") # strategy="STRICT_SPREAD" strict = only one job per node. Bad. 
     ray.get(pg.ready()) # wait for it to be ready
 
     # 1. put files in queue. 
@@ -266,96 +284,25 @@ def start_actors_staging(staging_input_files_list):
     for filepath_batch in filepath_batches:
         work_queue.put(filepath_batch)
         
-    # 1. put files in queue. 
-    # 2. pass queue to each worker. 
-    # 3. workers just pull next thing from queue till it's empty. Then they all gracefully exit. 
-        # ^ this happens in the actor class.
-    
-    # 2. 
-    # create actors (one per node?? Maybe... reduce that. Disable STRICT spread, do regular spread.)
-    submit_actors = [SubmitActor.options(placement_group=pg).remote(work_queue, pg) for _ in range(num_submission_actors)]
+    # 2. create actors ----- KEY IDEA HERE.
+    # Create a bunch of Actor class instances. I'm wrapping my ray tasks in an Actor class. 
+    # For some reason, the devs showed me this yields much better performance than using Ray Tasks directly, as I was doing previously.
+    start_time = time.time()
+    submit_actors = [SubmitActor.options(placement_group=pg).remote(work_queue, pg, start_time) for _ in range(num_submission_actors)]
     
     print("total filepath batches: ", len(filepath_batches), "<-- total number of jobs to submit")
     print("total submit_actors: ", len(submit_actors), "<-- expect this many CPUs utilized")
     
-    # start jobs
+    # 3. start jobs
     app_futures = []
     for actor in submit_actors:
         app_futures.append(actor.submit_jobs.remote())
     
-    for i in range(0, len(submit_actors)): 
+    # 4. collect results from each actor at end of job.
+    for _ in range(0, len(submit_actors)): 
         ready, not_ready = ray.wait(app_futures)
-        print("PRINTING READY individual task:", ray.get(ready))
-    
-        
-        
-    # ray.wait(submit_actors, num_returns=len(submit_actors))
-    
-    
-        
-    # while q.has_next():
-    #     # submit job to actor. 
-    #     print(list(pool.map(lambda a, v: a.double.remote(v),
-    #         [1, 2, 3, 4]))) 
-    
-
-    
-    ##########################################################
-    ##################### SCHEDULE TASKS #####################
-    ##########################################################
-    # app_futures = []
-    # for i, filepath_batch in enumerate(filepath_batches): # TODO: fix to do all batches. Using queue?
-        
-    #     # BLOCKING: Limit in-flight calls to number of submitter CPUs.
-    #     if len(app_futures) >= num_submission_actors:
-    #         print("Waiting for in-flight calls to finish...")
-    #         num_ready = i-num_submission_actors
-    #         print("Num_ready!???", num_ready)
-    #         ready, not_ready = ray.wait(app_futures) # catches one at a time.
-    #         try:
-    #             print("PRINTING READY ACTORS:", ready)
-    #             print(ray.get(ready))
-    #             print("num ready: ", len(ready), "and inner length: ", len(ready[0]))
-    #         except Exception as e:
-    #             print("Error in printing ready actors: ", e)
-        
-    #     print("Submitting batch {} of {}".format(i+1, len(filepath_batches)))
-    #     # start a submitter-actor on a batch of filepaths.
-    #     app_futures.append(submit_actors[i].submit_jobs.remote(filepath_batch, pg))
-        
-        
-    ########### GET RESULTS ###########
-    # print("num returns: ", len(filepath_batches))
-    # ready, not_ready = ray.wait(app_futures, num_returns=len(filepath_batches))
-    # # print
-    # try:
-    #     for batch_return in ready:
-    #         if type(batch_return) is list:
-    #             for future in batch_return:
-    #                 if type(future) is list:
-    #                     for third_loop in future:
-    #                         try:
-    #                             print("in 3rd loop")
-    #                             print(ray.get(third_loop))
-    #                         except Exception as e:
-    #                             print(e)  
-    #                 else:
-    #                     print(ray.get(future))
-    #         else:
-    #             print("in non list type")
-    #             all_returns = ray.get(batch_return)
-    #             print("all_returns:")
-    #             print(all_returns)
-    #             for return_val in all_returns:
-    #                 print("return val in all_returns loop:")
-    #                 things = ray.get(return_val)
-    #                 print("the invidiaul returnn val")
-    #                 print(things)
-    #         # for actual in batch_return:
-    #         #     print(ray.get(actual))
-    #     print("num ready returns:", len(ready))
-    # except Exception as e:
-    #     print("Failed during prints, lol. ", e)
+        print("PRINTING Failures (per actor):", ray.get(ready)[0])
+        print("PRINTING IP address of work (per actor):", ray.get(ready)[1])
     
     return
 
@@ -372,48 +319,39 @@ def print_cluster_stats():
 
 # @workflow.step(name="Step0_Stage_All")
 def step0_staging_actor_placement_group():
-    from copy import deepcopy
-    
-    FAILURES = []
-    FAILURE_PATHS = []
-    IP_ADDRESSES_OF_WORK = []
-    app_futures = []
-    start = time.time()
-    
-    # OLD METHOD "glob" all files. 
-    # stager.tiles.add_base_dir('base_input', BASE_DIR_OF_INPUT, '.shp')
-    # staging_input_files_list = stager.tiles.get_filenames_from_dir(base_dir = 'base_input')
-    
     # Input files! Now we use a list of files ('iwp-file-list.json')
     try:
         staging_input_files_list_raw = json.load(open('./exist_files_relative.json'))
     except FileNotFoundError as e:
         print("Hey you, please specify a json file containing a list of input file paths (relative to `BASE_DIR_OF_INPUT`).", e)
-    
+
     if ONLY_SMALL_TEST_RUN: # for testing only
         staging_input_files_list_raw = staging_input_files_list_raw[:TEST_RUN_SIZE]
 
-    # make paths absolute 
-    # todo refactor
-    staging_input_files_list = []
-    for filepath in staging_input_files_list_raw:
-        filepath = os.path.join(BASE_DIR_OF_INPUT, filepath)
-        staging_input_files_list.append(filepath)
+    # make paths absolute (not relative) 
+    staging_input_files_list = prepend(staging_input_files_list_raw, BASE_DIR_OF_INPUT)
     
-    
+    # save len of input
+    LEN_STAGING_FILES_LIST = len(staging_input_files_list)
+
+    # Save input file list in output dir, for reference and auditing.
+    json_filepath = os.path.join(OUTPUT, "staging_input_files_list.json")
+    with open(json_filepath, "w") as f:
+        json.dump(staging_input_files_list, f, indent=4, sort_keys=True)
+
     # start actors!
     start_actors_staging(staging_input_files_list)
     
-    # catch kill signal to shutdown on command (ctrl + c)
-    try: 
-        
-        pass
-        
-    except Exception as e:
-        print(f"Cauth error in Staging actor placement groups (step_0): {str(e)}")
-    finally:
-        return "😁 step 1 is done. Who knows about success."
+    return
 
+def prepend(List, str):
+    '''
+    Prepend str to front of each element of List. Typically filepaths.
+    '''
+    # Using format()
+    str += '{0}'
+    List = ((map(str.format, List)))
+    return List
 
 # @workflow.step(name="Step1_3D_Tiles")
 def step1_3d_tiles(stager):
@@ -715,8 +653,9 @@ def stage_remote(filepath):
 
 # 🎯 Best practice to ensure unique Workflow names.
 def make_workflow_id(name: str) -> str:
-  import pytz
   from datetime import datetime
+
+  import pytz
 
   # Timezones: US/{Pacific, Mountain, Central, Eastern}
   # All timezones `pytz.all_timezones`. Always use caution with timezones.
